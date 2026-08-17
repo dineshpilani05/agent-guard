@@ -16,6 +16,23 @@ var onBreakerTrip func(reason string)
 
 var toolCallWatcher *repeatWatcher
 
+// Pricing per million tokens, in USD. Update these if Anthropic changes
+// pricing — keeping them in one place makes that a one-line fix.
+const (
+	pricePerMillionInputTokens  = 3.00  // Sonnet input rate
+	pricePerMillionOutputTokens = 15.00 // Sonnet output rate
+)
+
+// runningTotalCost accumulates cost across the whole session — package
+// level so it persists across every request the proxy handles.
+var runningTotalCost float64
+
+func estimateCost(usage anthropicUsage) float64 {
+	inputCost := (float64(usage.InputTokens) / 1_000_000) * pricePerMillionInputTokens
+	outputCost := (float64(usage.OutputTokens) / 1_000_000) * pricePerMillionOutputTokens
+	return inputCost + outputCost
+}
+
 func startProxy(port string, targetURL string) error {
 	target, err := url.Parse(targetURL)
 	if err != nil {
@@ -232,8 +249,11 @@ func parseStreamingResponse(bodyBytes []byte) {
 func reportUsage(usage anthropicUsage) {
 	if usage.InputTokens > 0 || usage.OutputTokens > 0 {
 		total := usage.InputTokens + usage.OutputTokens
-		fmt.Printf("  📊 tokens used: %d in / %d out (%d total)\n",
-			usage.InputTokens, usage.OutputTokens, total)
+		cost := estimateCost(usage)
+		runningTotalCost += cost
+
+		fmt.Printf("  📊 tokens used: %d in / %d out (%d total) — $%.4f this call, $%.4f session total\n",
+			usage.InputTokens, usage.OutputTokens, total, cost, runningTotalCost)
 	}
 }
 
@@ -242,7 +262,8 @@ func reportToolCall(name string, inputJSON string) {
 	fmt.Printf("  🔧 tool call: %s\n", signature)
 
 	if toolCallWatcher.observe(signature) {
-		reason := fmt.Sprintf("tool call repeated %d times: %s", toolCallWatcher.countFor(signature), signature)
+		reason := fmt.Sprintf("tool call repeated %d times: %s (session cost so far: $%.4f)",
+			toolCallWatcher.countFor(signature), signature, runningTotalCost)
 		fmt.Println("\n🚨 CIRCUIT BREAKER TRIPPED (repeated tool call detected) 🚨")
 		fmt.Println("  " + reason)
 
